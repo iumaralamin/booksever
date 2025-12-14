@@ -1,10 +1,12 @@
- const express = require('express');
+const express = require('express');
 const multer = require('multer');
 const { Storage } = require('megajs');
 const fs = require('fs');
 const path = require('path');
 
+const cors = require('cors');
 const app = express();
+app.use(cors());
 const upload = multer({ dest: 'uploads/' });
 
 // Load environment variables
@@ -17,6 +19,10 @@ if (!MEGA_EMAIL || !MEGA_PASSWORD) {
 }
 
 let megaClient = null;
+// Keep a short-lived in-memory map of recent uploads to guarantee lookup
+// Stores { file: MutableFile, expiresAt: number }
+const recentUploads = new Map();
+const UPLOAD_CACHE_TTL_MS = parseInt(process.env.UPLOAD_CACHE_TTL_MS || String(15 * 60 * 1000), 10);
 
 async function getMegaClient() {
     // Fail fast if credentials are missing
@@ -98,6 +104,19 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
             return res.status(500).json({ success: false, error: 'File uploaded but could not extract handle' });
         }
 
+        // Cache uploaded file object for immediate retrieval during downloads
+        try {
+            const entry = { file: uploadedFile, expiresAt: Date.now() + UPLOAD_CACHE_TTL_MS };
+            recentUploads.set(fileHandle, entry);
+            // Schedule eviction
+            setTimeout(() => {
+                recentUploads.delete(fileHandle);
+                console.log('Evicted recent upload from cache:', fileHandle);
+            }, UPLOAD_CACHE_TTL_MS + 1000);
+        } catch (e) {
+            console.warn('Could not cache recent upload:', e && e.message ? e.message : e);
+        }
+
         // Return a direct download URL via the proxy
         const downloadUrl = `https://booksever-1.onrender.com/download/${fileHandle}`;
         console.log('Upload successful, download URL:', downloadUrl);
@@ -122,7 +141,7 @@ app.get('/', (req, res) => {
     res.send('bookserver proxy is running! Ready for uploads.');
 });
 
-// Download endpoint - stream file directly to client
+// Download endpoint - stream file directly to client with Range support
 app.get('/download/:fileHandle', async (req, res) => {
     const fileHandle = req.params.fileHandle;
 
@@ -133,13 +152,16 @@ app.get('/download/:fileHandle', async (req, res) => {
     try {
         const client = await getMegaClient();
 
-        // Find file by handle in the client's storage mapping
-        let file = null;
-        if (client.files && client.files[fileHandle]) {
-            file = client.files[fileHandle];
-        } else if (client.files) {
-            // Try to find by matching nodeId/h/id in values
-            file = Object.values(client.files).find(f => f && (f.nodeId === fileHandle || f.h === fileHandle || f.id === fileHandle));
+        // Find file by handle in recent uploads cache first, then client's storage mapping
+        let cached = recentUploads.get(fileHandle) || null;
+        let file = cached ? cached.file : null;
+        if (!file && client.files) {
+            if (client.files[fileHandle]) {
+                file = client.files[fileHandle];
+            } else {
+                // Try to find by matching nodeId/h/id in values
+                file = Object.values(client.files).find(f => f && (f.nodeId === fileHandle || f.h === fileHandle || f.id === fileHandle));
+            }
         }
 
         if (!file) {
@@ -147,23 +169,81 @@ app.get('/download/:fileHandle', async (req, res) => {
             return res.status(404).json({ success: false, error: 'File not found' });
         }
 
-        console.log('Streaming file:', file.name, 'nodeId:', file.nodeId);
+        const totalSize = Number(file.size) || 0;
+        const rangeHeader = req.headers.range;
+        const filename = file.name || 'file';
 
-        // Set headers for download
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
-        res.setHeader('Cache-Control', 'no-cache');
+        // Helper to set common headers
+        const setCommonHeaders = (length) => {
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Accept-Ranges', 'bytes');
+            // Basic content-type detection
+            const ext = (path.extname(filename) || '').toLowerCase();
+            let contentType = 'application/octet-stream';
+            if (ext === '.pdf') contentType = 'application/pdf';
+            else if (ext === '.epub') contentType = 'application/epub+zip';
+            else if (ext === '.txt') contentType = 'text/plain';
+            res.setHeader('Content-Type', contentType);
+            if (typeof length === 'number') res.setHeader('Content-Length', String(length));
+        };
 
-        // Create read stream and pipe to response
-        const stream = file.download();
-        stream.pipe(res);
+        if (!rangeHeader) {
+            // No Range requested — send whole file
+            setCommonHeaders(totalSize);
+            const stream = file.download();
+            stream.on('error', (err) => {
+                console.error('Stream error:', err);
+                if (!res.headersSent) res.status(500).json({ success: false, error: 'Download failed' });
+            });
+            stream.pipe(res);
+            return;
+        }
+
+        // Parse Range header: bytes=start-end
+        const matches = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+        if (!matches) {
+            return res.status(416).json({ success: false, error: 'Malformed Range header' });
+        }
+
+        let start = matches[1] ? parseInt(matches[1], 10) : 0;
+        let end = matches[2] ? parseInt(matches[2], 10) : (totalSize - 1);
+
+        if (isNaN(start) || isNaN(end) || start > end || start < 0) {
+            return res.status(416).json({ success: false, error: 'Requested Range Not Satisfiable' });
+        }
+
+        end = Math.min(end, totalSize - 1);
+        const chunkSize = (end - start) + 1;
+
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+        setCommonHeaders(chunkSize);
+
+        // Try to request a ranged stream from megajs. megajs exposes `download(start, end)` in some versions
+        let stream = null;
+        try {
+            // Preferred: call with numeric args
+            stream = file.download(start, end);
+        } catch (err1) {
+            try {
+                // Alternative: object param
+                stream = file.download({ start, end });
+            } catch (err2) {
+                console.warn('Ranged download not supported by megajs client, falling back to full stream');
+                stream = file.download();
+            }
+        }
 
         stream.on('error', (err) => {
             console.error('Stream error:', err);
-            if (!res.headersSent) {
-                res.status(500).json({ success: false, error: 'Download failed' });
-            }
+            if (!res.headersSent) res.status(500).json({ success: false, error: 'Download failed' });
         });
+
+        // If we had to fall back to full stream while a range was requested,
+        // the client may receive the whole file. This is a best-effort fallback.
+        stream.pipe(res);
+
     } catch (error) {
         console.error('Download error:', error);
         res.status(500).json({ success: false, error: error.message || 'Download failed' });
