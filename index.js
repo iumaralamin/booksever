@@ -1,45 +1,77 @@
-  const Mega = require('megajs');
+const express = require('express');
+const multer = require('multer');
+const { Storage } = require('megajs');
+const fs = require('fs');
 
-let storage = null;
-let storageReady = false;
+const app = express();
+const upload = multer({ dest: 'uploads/' });
 
-async function initMega() {
-  const email = process.env.MEGA_EMAIL;
-  const password = process.env.MEGA_PASSWORD;
-  if (!email || !password) throw new Error('Missing MEGA_EMAIL or MEGA_PASSWORD');
+// Load from Glitch .env (secure!)
+const MEGA_EMAIL = process.env.MEGA_EMAIL;
+const MEGA_PASSWORD = process.env.MEGA_PASSWORD;
 
-  storage = Mega({ email, password });
-
-  await new Promise((resolve, reject) => {
-    const onReady = () => {
-      storageReady = true;
-      console.log('MEGA storage ready');
-      cleanup();
-      resolve();
-    };
-    const onError = (err) => {
-      console.error('MEGA init error', err);
-      cleanup();
-      reject(err);
-    };
-    const cleanup = () => {
-      storage.removeListener('ready', onReady);
-      storage.removeListener('error', onError);
-    };
-    storage.on('ready', onReady);
-    storage.on('error', onError);
-    // timeout
-    setTimeout(() => {
-      cleanup();
-      reject(new Error('MEGA init timeout'));
-    }, 20000);
-  });
+// Basic check—if not set, log error (helps debugging)
+if (!MEGA_EMAIL || !MEGA_PASSWORD) {
+  console.error('ERROR: Set MEGA_EMAIL and MEGA_PASSWORD in .env file!');
 }
 
-app.get('/health', (req, res) => {
-  if (storageReady) return res.json({ ok: true });
-  return res.status(503).json({ ok: false, message: 'storage not ready' });
+let megaClient = null;
+
+async function getMegaClient() {
+  if (!megaClient) {
+    megaClient = new Storage({
+      email: MEGA_EMAIL,
+      password: MEGA_PASSWORD
+    });
+    await megaClient.ready;
+    console.log('Connected to MEGA successfully');
+  }
+  return megaClient;
+}
+
+// Upload endpoint (same as before)
+app.post('/upload-book', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded' });
+  }
+
+  try {
+    const client = await getMegaClient();
+
+    const filePath = req.file.path;
+    const originalName = req.body.filename || req.file.originalname || 'book.pdf';
+    const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    const stream = fs.createReadStream(filePath);
+
+    const uploadTask = client.upload({ name: safeName }, stream);
+    const uploadedFile = await uploadTask.complete;
+
+    fs.unlink(filePath, (err) => {
+      if (err) console.error('Cleanup error:', err);
+    });
+
+    console.log('Upload successful:', safeName);
+
+    res.json({
+      success: true,
+      bookUrl: uploadedFile.link
+    });
+
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Upload failed'
+    });
+  }
 });
 
-// in upload route:
-if (!storageReady) return res.status(503).json({ success: false, error: 'storage not ready' });
+app.get('/', (req, res) => {
+  res.send('bookserver proxy is running! Ready for uploads.');
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
