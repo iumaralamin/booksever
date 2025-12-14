@@ -69,59 +69,23 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
 
         const uploadedFile = await uploadTask.complete;
 
+        // Store the file handle for later download via proxy
+        const fileHandle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
+        if (!fileHandle) {
+            console.error('ERROR: Could not extract file handle from uploaded file');
+            return res.status(500).json({ success: false, error: 'File uploaded but could not extract handle' });
+        }
+
+        // Return a direct download URL via the proxy
+        const downloadUrl = `https://booksever-1.onrender.com/download/${fileHandle}`;
+        console.log('Upload successful, download URL:', downloadUrl);
+
         // Clean up temp file
         fs.unlink(filePath, (err) => {
             if (err) console.error('Cleanup error:', err);
         });
 
-        console.log('Upload successful:', safeName);
-
-        // Avoid JSON.stringify(uploadedFile) because it may contain circular refs.
-        // Log only specific, safe properties for diagnosis.
-        try {
-            console.log('DEBUG uploadedFile.name:', uploadedFile?.name);
-            console.log('DEBUG uploadedFile.h (handle):', uploadedFile?.h);
-            console.log('DEBUG uploadedFile.link:', uploadedFile?.link);
-            console.log('DEBUG uploadedFile.nodeID:', uploadedFile?.nodeID);
-        } catch (e) {
-            console.warn('DEBUG logging uploadedFile failed:', e && e.message ? e.message : e);
-        }
-
-        // Generate public link for the uploaded file using uploadedFile.link() when available
-        try {
-            if (uploadedFile && typeof uploadedFile.link === 'function') {
-                // uploadedFile.link uses callback(err, url)
-                return uploadedFile.link((err, url) => {
-                    if (err) {
-                        console.error('file.link() error:', err && err.message ? err.message : err);
-                        // fallback to handle-based link below
-                        const fallbackHandle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
-                        if (fallbackHandle) {
-                            const fallbackUrl = `https://mega.nz/file/${fallbackHandle}`;
-                            console.log('Using fallback handle link:', fallbackUrl);
-                            return res.json({ success: true, bookUrl: fallbackUrl });
-                        }
-                        return res.status(500).json({ success: false, error: 'Failed to generate share link' });
-                    }
-                    console.log('Generated share link via file.link():', url);
-                    return res.json({ success: true, bookUrl: url });
-                });
-            }
-
-            // If no .link function, try constructing from handle
-            const handle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
-            if (handle) {
-                const url = `https://mega.nz/file/${handle}`;
-                console.log('Constructed MEGA link from handle:', handle);
-                return res.json({ success: true, bookUrl: url });
-            }
-
-            console.error('ERROR: Could not generate bookUrl; uploadedFile lacked link/handle');
-            return res.status(500).json({ success: false, error: 'File uploaded but could not generate download link' });
-        } catch (linkErr) {
-            console.error('Error generating link:', linkErr && linkErr.message ? linkErr.message : linkErr);
-            return res.status(500).json({ success: false, error: 'Failed to generate download link' });
-        }
+        return res.json({ success: true, bookUrl: downloadUrl });
 
     } catch (error) {
         console.error('Upload error:', error);
@@ -134,6 +98,46 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
 
 app.get('/', (req, res) => {
     res.send('bookserver proxy is running! Ready for uploads.');
+});
+
+// Download endpoint - stream file directly to client
+app.get('/download/:fileHandle', async (req, res) => {
+    const fileHandle = req.params.fileHandle;
+
+    if (!fileHandle) {
+        return res.status(400).json({ success: false, error: 'File handle required' });
+    }
+
+    try {
+        const client = await getMegaClient();
+
+        // Find file by handle in the client's storage
+        const file = client.find(fileHandle);
+        if (!file) {
+            return res.status(404).json({ success: false, error: 'File not found' });
+        }
+
+        console.log('Streaming file:', file.name);
+
+        // Set headers for download
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+        res.setHeader('Cache-Control', 'no-cache');
+
+        // Create read stream and pipe to response
+        const stream = file.download();
+        stream.pipe(res);
+
+        stream.on('error', (err) => {
+            console.error('Stream error:', err);
+            if (!res.headersSent) {
+                res.status(500).json({ success: false, error: 'Download failed' });
+            }
+        });
+    } catch (error) {
+        console.error('Download error:', error);
+        res.status(500).json({ success: false, error: error.message || 'Download failed' });
+    }
 });
 
 // Health check endpoint
