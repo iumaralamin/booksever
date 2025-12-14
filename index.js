@@ -1,4 +1,4 @@
-   const express = require('express');
+ const express = require('express');
 const multer = require('multer');
 const { Storage } = require('megajs');
 const fs = require('fs');
@@ -76,21 +76,26 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
 
         console.log('Upload successful:', safeName);
 
+        // DEBUG: Log the entire uploadedFile object to see what we're working with
+        console.log('DEBUG uploadedFile object:', JSON.stringify(uploadedFile, null, 2));
+        console.log('DEBUG uploadedFile keys:', Object.keys(uploadedFile || {}));
+        console.log('DEBUG uploadedFile.link:', uploadedFile?.link);
+        console.log('DEBUG uploadedFile.nodeID:', uploadedFile?.nodeID);
+        console.log('DEBUG uploadedFile.h:', uploadedFile?.h);
+
         // Generate public link for the uploaded file
         let bookUrl = null;
         try {
+            // Try different ways to get the file handle/ID
+            let fileHandle = uploadedFile?.nodeID || uploadedFile?.h || uploadedFile?.id;
+
             if (uploadedFile && uploadedFile.link) {
                 bookUrl = uploadedFile.link;
-            } else if (uploadedFile && uploadedFile.shareKey) {
-                // Construct link manually if needed
-                const handle = uploadedFile.nodeID || uploadedFile.id;
-                const key = uploadedFile.shareKey;
-                if (handle && key) {
-                    bookUrl = `https://mega.nz/file/${handle}#${key}`;
-                }
-            } else if (uploadedFile && uploadedFile.nodeID) {
-                // Fallback: just use the node ID
-                bookUrl = `https://mega.nz/file/${uploadedFile.nodeID}`;
+                console.log('✓ Using uploadedFile.link');
+            } else if (fileHandle) {
+                // Construct a MEGA public link manually
+                bookUrl = `https://mega.nz/file/${fileHandle}`;
+                console.log('✓ Constructed MEGA link from handle:', fileHandle);
             }
             console.log('Generated bookUrl:', bookUrl);
         } catch (linkErr) {
@@ -98,6 +103,7 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
         }
 
         if (!bookUrl) {
+            console.error('ERROR: Could not generate bookUrl. Uploaded file object was:', uploadedFile);
             return res.status(500).json({
                 success: false,
                 error: 'File uploaded but could not generate download link'
