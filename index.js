@@ -87,29 +87,41 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
             console.warn('DEBUG logging uploadedFile failed:', e && e.message ? e.message : e);
         }
 
-        // Generate public link for the uploaded file using available handle
-        let bookUrl = null;
+        // Generate public link for the uploaded file using uploadedFile.link() when available
         try {
-            // megajs exposes a file handle in different properties depending on version
-            const handle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
-            if (uploadedFile && uploadedFile.link) {
-                bookUrl = uploadedFile.link;
-                console.log('Using uploadedFile.link');
-            } else if (handle) {
-                // Construct typical MEGA file link (note: may require key to be downloadable)
-                bookUrl = `https://mega.nz/file/${handle}`;
-                console.log('Constructed MEGA link from handle:', handle);
+            if (uploadedFile && typeof uploadedFile.link === 'function') {
+                // uploadedFile.link uses callback(err, url)
+                return uploadedFile.link((err, url) => {
+                    if (err) {
+                        console.error('file.link() error:', err && err.message ? err.message : err);
+                        // fallback to handle-based link below
+                        const fallbackHandle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
+                        if (fallbackHandle) {
+                            const fallbackUrl = `https://mega.nz/file/${fallbackHandle}`;
+                            console.log('Using fallback handle link:', fallbackUrl);
+                            return res.json({ success: true, bookUrl: fallbackUrl });
+                        }
+                        return res.status(500).json({ success: false, error: 'Failed to generate share link' });
+                    }
+                    console.log('Generated share link via file.link():', url);
+                    return res.json({ success: true, bookUrl: url });
+                });
             }
+
+            // If no .link function, try constructing from handle
+            const handle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
+            if (handle) {
+                const url = `https://mega.nz/file/${handle}`;
+                console.log('Constructed MEGA link from handle:', handle);
+                return res.json({ success: true, bookUrl: url });
+            }
+
+            console.error('ERROR: Could not generate bookUrl; uploadedFile lacked link/handle');
+            return res.status(500).json({ success: false, error: 'File uploaded but could not generate download link' });
         } catch (linkErr) {
             console.error('Error generating link:', linkErr && linkErr.message ? linkErr.message : linkErr);
+            return res.status(500).json({ success: false, error: 'Failed to generate download link' });
         }
-
-        if (!bookUrl) {
-            console.error('ERROR: Could not generate bookUrl; uploadedFile lacked handle/link.');
-            return res.status(500).json({ success: false, error: 'File uploaded but could not generate download link' });
-        }
-
-        res.json({ success: true, bookUrl });
 
     } catch (error) {
         console.error('Upload error:', error);
