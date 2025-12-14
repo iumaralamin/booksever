@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const multer = require('multer');
 const { Storage } = require('megajs');
 const fs = require('fs');
@@ -78,14 +78,15 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
         console.log('DEBUG uploadedFile type:', typeof uploadedFile);
 
         // Try to extract handle from different possible properties
-        let fileHandle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
+        // megajs returns the node id as `nodeId` on the MutableFile object
+        let fileHandle = uploadedFile?.nodeId || uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
 
         // If still not found, try looking through client files
         if (!fileHandle && client.files) {
             console.log('Searching through client.files for uploaded file...');
             for (const f of Object.values(client.files)) {
                 if (f && f.name === safeName) {
-                    fileHandle = f.h || f.nodeID || f.id;
+                    fileHandle = f.nodeId || f.h || f.nodeID || f.id;
                     console.log('Found file in client.files:', fileHandle);
                     break;
                 }
@@ -132,13 +133,21 @@ app.get('/download/:fileHandle', async (req, res) => {
     try {
         const client = await getMegaClient();
 
-        // Find file by handle in the client's storage
-        const file = client.find(fileHandle);
+        // Find file by handle in the client's storage mapping
+        let file = null;
+        if (client.files && client.files[fileHandle]) {
+            file = client.files[fileHandle];
+        } else if (client.files) {
+            // Try to find by matching nodeId/h/id in values
+            file = Object.values(client.files).find(f => f && (f.nodeId === fileHandle || f.h === fileHandle || f.id === fileHandle));
+        }
+
         if (!file) {
+            console.warn('File not found in client.files for handle:', fileHandle);
             return res.status(404).json({ success: false, error: 'File not found' });
         }
 
-        console.log('Streaming file:', file.name);
+        console.log('Streaming file:', file.name, 'nodeId:', file.nodeId);
 
         // Set headers for download
         res.setHeader('Content-Type', 'application/octet-stream');
