@@ -69,10 +69,31 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
 
         const uploadedFile = await uploadTask.complete;
 
-        // Store the file handle for later download via proxy
-        const fileHandle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
+        // Debug: log all properties to see what's available
+        console.log('DEBUG uploadedFile keys:', Object.keys(uploadedFile || {}));
+        console.log('DEBUG uploadedFile.h:', uploadedFile?.h);
+        console.log('DEBUG uploadedFile.nodeID:', uploadedFile?.nodeID);
+        console.log('DEBUG uploadedFile.id:', uploadedFile?.id);
+        console.log('DEBUG uploadedFile.name:', uploadedFile?.name);
+        console.log('DEBUG uploadedFile type:', typeof uploadedFile);
+
+        // Try to extract handle from different possible properties
+        let fileHandle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
+
+        // If still not found, try looking through client files
+        if (!fileHandle && client.files) {
+            console.log('Searching through client.files for uploaded file...');
+            for (const f of Object.values(client.files)) {
+                if (f && f.name === safeName) {
+                    fileHandle = f.h || f.nodeID || f.id;
+                    console.log('Found file in client.files:', fileHandle);
+                    break;
+                }
+            }
+        }
+
         if (!fileHandle) {
-            console.error('ERROR: Could not extract file handle from uploaded file');
+            console.error('ERROR: Could not extract file handle. uploadedFile:', uploadedFile);
             return res.status(500).json({ success: false, error: 'File uploaded but could not extract handle' });
         }
 
