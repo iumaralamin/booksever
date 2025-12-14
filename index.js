@@ -76,44 +76,40 @@ app.post('/upload-book', upload.single('file'), async (req, res) => {
 
         console.log('Upload successful:', safeName);
 
-        // DEBUG: Log the entire uploadedFile object to see what we're working with
-        console.log('DEBUG uploadedFile object:', JSON.stringify(uploadedFile, null, 2));
-        console.log('DEBUG uploadedFile keys:', Object.keys(uploadedFile || {}));
-        console.log('DEBUG uploadedFile.link:', uploadedFile?.link);
-        console.log('DEBUG uploadedFile.nodeID:', uploadedFile?.nodeID);
-        console.log('DEBUG uploadedFile.h:', uploadedFile?.h);
+        // Avoid JSON.stringify(uploadedFile) because it may contain circular refs.
+        // Log only specific, safe properties for diagnosis.
+        try {
+            console.log('DEBUG uploadedFile.name:', uploadedFile?.name);
+            console.log('DEBUG uploadedFile.h (handle):', uploadedFile?.h);
+            console.log('DEBUG uploadedFile.link:', uploadedFile?.link);
+            console.log('DEBUG uploadedFile.nodeID:', uploadedFile?.nodeID);
+        } catch (e) {
+            console.warn('DEBUG logging uploadedFile failed:', e && e.message ? e.message : e);
+        }
 
-        // Generate public link for the uploaded file
+        // Generate public link for the uploaded file using available handle
         let bookUrl = null;
         try {
-            // Try different ways to get the file handle/ID
-            let fileHandle = uploadedFile?.nodeID || uploadedFile?.h || uploadedFile?.id;
-
+            // megajs exposes a file handle in different properties depending on version
+            const handle = uploadedFile?.h || uploadedFile?.nodeID || uploadedFile?.id;
             if (uploadedFile && uploadedFile.link) {
                 bookUrl = uploadedFile.link;
-                console.log('✓ Using uploadedFile.link');
-            } else if (fileHandle) {
-                // Construct a MEGA public link manually
-                bookUrl = `https://mega.nz/file/${fileHandle}`;
-                console.log('✓ Constructed MEGA link from handle:', fileHandle);
+                console.log('Using uploadedFile.link');
+            } else if (handle) {
+                // Construct typical MEGA file link (note: may require key to be downloadable)
+                bookUrl = `https://mega.nz/file/${handle}`;
+                console.log('Constructed MEGA link from handle:', handle);
             }
-            console.log('Generated bookUrl:', bookUrl);
         } catch (linkErr) {
-            console.error('Error generating link:', linkErr);
+            console.error('Error generating link:', linkErr && linkErr.message ? linkErr.message : linkErr);
         }
 
         if (!bookUrl) {
-            console.error('ERROR: Could not generate bookUrl. Uploaded file object was:', uploadedFile);
-            return res.status(500).json({
-                success: false,
-                error: 'File uploaded but could not generate download link'
-            });
+            console.error('ERROR: Could not generate bookUrl; uploadedFile lacked handle/link.');
+            return res.status(500).json({ success: false, error: 'File uploaded but could not generate download link' });
         }
 
-        res.json({
-            success: true,
-            bookUrl: bookUrl
-        });
+        res.json({ success: true, bookUrl });
 
     } catch (error) {
         console.error('Upload error:', error);
