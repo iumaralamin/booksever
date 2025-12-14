@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "multer": "^1.4.5-lts.1",
+    "multer": "^2.0.0-rc.8",  // Latest stable as of Dec 2025 (fully patched)
     "megajs": "^1.1.0"
   }
 }
